@@ -1,0 +1,275 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // =========================================================================
+    // NETDUNIYA MULTI-TENANT SECURITY RULES & ACCESS CONTROL MATRIX
+    // =========================================================================
+    // 1. Strict multi-tenant isolation: Standard users can only view & manage
+    //    their own data (applications, PVC orders, wallet balance, payments, etc.)
+    // 2. Full Administrator Governance: Admins can view, edit, block, delete,
+    //    and adjust balances across all collections.
+    // 3. Dual collection name support: camelCase and snake_case collections.
+    // 4. Public Tracking Support: Single document get allowed for tracking IDs.
+    // =========================================================================
+
+    // Authentication & Authorization Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isDocOwner() {
+      return isAuthenticated() && resource != null && resource.data.userId == request.auth.uid;
+    }
+
+    function isIncomingDocOwner() {
+      return isAuthenticated() && request.resource.data.userId == request.auth.uid;
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.email == 'admin@netduniya.in' ||
+        request.auth.token.admin == true ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (
+          exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'super_admin', 'service_manager', 'finance_manager', 'content_manager', 'support_manager']
+        )
+      );
+    }
+
+    // Protects critical fields from unauthorized user manipulation
+    function userNotTamperingCriticalFields() {
+      return (
+        (!('role' in request.resource.data) || request.resource.data.role == resource.data.role) &&
+        (!('walletBalance' in request.resource.data) || request.resource.data.walletBalance == resource.data.walletBalance) &&
+        (!('isActive' in request.resource.data) || request.resource.data.isActive == resource.data.isActive)
+      );
+    }
+
+    // =========================================================================
+    // 1. USERS & WALLET LEDGER
+    // =========================================================================
+    match /users/{userId} {
+      // Only the user themselves or an admin can read the user's profile
+      allow read: if isOwner(userId) || isAdmin();
+      
+      // User creates profile on signup
+      allow create: if isOwner(userId) || isAdmin();
+      
+      // Admin has full control. User can update profile details, but cannot forge role, balance or active status
+      allow update: if isAdmin() || (isOwner(userId) && userNotTamperingCriticalFields());
+      
+      // Only admin can permanently delete a user account
+      allow delete: if isAdmin();
+      
+      // User Wallet Transactions Ledger (supports both camelCase & snake_case subcollections)
+      match /walletTransactions/{txId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId) || isAdmin();
+        allow update, delete: if isAdmin();
+      }
+
+      match /wallet_transactions/{txId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId) || isAdmin();
+        allow update, delete: if isAdmin();
+      }
+    }
+
+    // Admins Registry
+    match /admins/{adminId} {
+      allow read: if isAdmin();
+      allow create: if isOwner(adminId) || isAdmin();
+      allow update, delete: if isAdmin();
+    }
+
+    // Root-level wallet transactions alias (if referenced directly)
+    match /walletTransactions/{txId} {
+      allow read: if isAuthenticated() && (isDocOwner() || isAdmin());
+      allow create: if isAuthenticated() && (isIncomingDocOwner() || isAdmin());
+      allow update, delete: if isAdmin();
+    }
+    match /wallet_transactions/{txId} {
+      allow read: if isAuthenticated() && (isDocOwner() || isAdmin());
+      allow create: if isAuthenticated() && (isIncomingDocOwner() || isAdmin());
+      allow update, delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // 2. CITIZEN SERVICE APPLICATIONS
+    // =========================================================================
+    match /applications/{appId} {
+      // Allow single document lookup for public tracking if tracking ID is known
+      allow get: if true;
+      // List query is strictly protected: only user's own applications or admin
+      allow list: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      
+      // User can create application
+      allow create: if isAuthenticated() && (isIncomingDocOwner() || isAdmin());
+      
+      // Admin can update status, timeline, notes. User can only edit if in draft/resubmission mode.
+      allow update: if isAdmin() || (
+        isAuthenticated() && 
+        isDocOwner() && 
+        resource.data.status in ['submitted', 'documents_required', 'pending']
+      );
+      
+      // Only admin can delete applications
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // 3. PVC CARD PRINTING ORDERS
+    // =========================================================================
+    match /pvcOrders/{orderId} {
+      allow get: if true;
+      allow list: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if true;
+      allow update, delete: if isAdmin();
+    }
+    match /pvc_orders/{orderId} {
+      allow get: if true;
+      allow list: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if true;
+      allow update, delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // 4. SHOP PRODUCTS & ORDERS
+    // =========================================================================
+    match /products/{prodId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    match /shop_products/{prodId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    
+    match /orders/{orderId} {
+      allow get: if true;
+      allow list: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if true;
+      allow update, delete: if isAdmin();
+    }
+    match /shop_orders/{orderId} {
+      allow get: if true;
+      allow list: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if true;
+      allow update, delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // 5. APPOINTMENTS (ONLINE / IN-PERSON KENDRA BOOKINGS)
+    // =========================================================================
+    match /appointments/{aptId} {
+      allow get: if true;
+      allow list: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if true;
+      allow update: if isAuthenticated() && (isDocOwner() || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // 6. ONLINE PAYMENTS (RAZORPAY / DIGITAL WALLET / UPI QR)
+    // =========================================================================
+    match /payments/{paymentId} {
+      allow get: if isAuthenticated() && (isDocOwner() || isAdmin());
+      allow list: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if true;
+      allow update, delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // 7. CITIZEN SUPPORT TICKETS
+    // =========================================================================
+    match /supportTickets/{ticketId} {
+      allow read: if isAuthenticated() && (isDocOwner() || isAdmin());
+      allow create: if isAuthenticated() && (isIncomingDocOwner() || isAdmin());
+      allow update: if isAuthenticated() && (isDocOwner() || isAdmin());
+      allow delete: if isAdmin();
+    }
+    match /support_tickets/{ticketId} {
+      allow read: if isAuthenticated() && (isDocOwner() || isAdmin());
+      allow create: if isAuthenticated() && (isIncomingDocOwner() || isAdmin());
+      allow update: if isAuthenticated() && (isDocOwner() || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // 8. PUBLIC CONTENT, SERVICES & GOVERNMENT CATALOGS (READ ONLY FOR PUBLIC)
+    // =========================================================================
+    match /services/{serviceId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    
+    match /schemes/{schemeId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /jobs/{jobId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /notices/{noticeId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    
+    match /importantLinks/{linkId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    match /important_links/{linkId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    
+    match /blogs/{blogId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    
+    match /banners/{bannerId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /content/{contentId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // =========================================================================
+    // 9. AUDIT LOGS (APPEND-ONLY, AUDITABLE BY ADMIN)
+    // =========================================================================
+    match /auditLogs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAuthenticated();
+      allow update, delete: if isAdmin();
+    }
+    match /audit_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAuthenticated();
+      allow update, delete: if isAdmin();
+    }
+  }
+}

@@ -1,0 +1,39 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // User and admin uploaded service applications
+    match /applications/{allPaths=**} {
+      allow read: if true;
+      allow write: if isAuthenticated() && request.resource.size < 25 * 1024 * 1024; // 25MB max
+    }
+
+    // PVC Card document uploads
+    match /pvc/{allPaths=**} {
+      allow read: if true;
+      allow write: if request.resource.size < 25 * 1024 * 1024;
+    }
+
+    // General user documents
+    match /documents/{allPaths=**} {
+      allow read: if true;
+      allow write: if isAuthenticated() && request.resource.size < 25 * 1024 * 1024;
+    }
+    
+    // Public assets and banners
+    match /public/{allPaths=**} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Catch-all for any other uploaded assets
+    match /{allPaths=**} {
+      allow read: if true;
+      allow write: if isAuthenticated() && request.resource.size < 25 * 1024 * 1024;
+    }
+  }
+}
